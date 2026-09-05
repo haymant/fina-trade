@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/haymant/fina-trade/blob/main/schema/trade.schema.json",
+  "title": "FinA trade and lifecycle event contract",
+  "type": "object",
+  "required": ["trade_id", "instrument_id", "product_type", "status", "notional", "currency", "created_at"],
+  "properties": {
+    "trade_id": {"type": "string"}, "instrument_id": {"type": "string"}, "product_type": {"type": "string"},
+    "status": {"enum": ["RFQ", "QUOTED", "LIVE", "AMENDED", "CANCELLED", "MATURED", "TERMINATED"]},
+    "notional": {"type": "number", "exclusiveMinimum": 0}, "currency": {"type": "string", "minLength": 3},
+    "quote": {"type": ["object", "null"]}, "terms": {"type": "object"}, "created_at": {"type": "string"}, "updated_at": {"type": "string"}
+  }, "additionalProperties": true
+}
