@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from mcp.server.fastmcp import FastMCP
+
+from .postgres_repository import PostgresTradeRepository
+
+mcp = FastMCP("fina-trade")
+
+
+def repository() -> PostgresTradeRepository:
+    return PostgresTradeRepository()
+
+
+@mcp.tool()
+def database_health() -> dict[str, Any]:
+    """Check that the configured Postgres database is reachable."""
+    with repository().connection() as conn:
+        row = conn.execute("SELECT current_database() AS database, now() AS server_time").fetchone()
+    return {"ok": True, **dict(row)}
+
+
+@mcp.tool()
+def database_migrate() -> dict[str, Any]:
+    """Apply the additive normalized schema; require explicit migration opt-in."""
+    if os.environ.get("FINA_ALLOW_MIGRATIONS") != "true":
+        raise ValueError("set FINA_ALLOW_MIGRATIONS=true for explicit schema migration")
+    from pathlib import Path
+    sql = (Path(__file__).resolve().parents[1] / "schema" / "postgres.sql").read_text(encoding="utf-8")
+    repository().migrate(sql)
+    return {"ok": True, "migrated": True}
+
+
+@mcp.tool()
+def rfq_create(rfq: dict[str, Any]) -> dict[str, Any]:
+    """Persist a received equity-derivatives RFQ."""
+    return repository().create_rfq(rfq)
+
+
+@mcp.tool()
+def quote_persist(quote: dict[str, Any]) -> dict[str, Any]:
+    """Persist a versioned quote returned by fina-pricer for an RFQ."""
+    return repository().persist_quote(quote)
+
+
+@mcp.tool()
+def trade_accept(trade: dict[str, Any]) -> dict[str, Any]:
+    """Accept a quote and create the normalized trade aggregate."""
+    return repository().accept_quote(trade)
+
+
+@mcp.tool()
+def trade_amend(trade_id: str, changes: dict[str, Any], reason: str = "amend") -> dict[str, Any]:
+    """Apply a lifecycle amendment and append an audit event transactionally."""
+    return repository().amend_trade(trade_id, changes, reason)
+
+
+@mcp.tool()
+def trade_get(trade_id: str) -> dict[str, Any]:
+    """Read one normalized trade."""
+    return repository().get_trade(trade_id)
+
+
+@mcp.tool()
+def trade_lifecycle(trade_id: str) -> list[dict[str, Any]]:
+    """Read append-only lifecycle events for one trade."""
+    return repository().lifecycle(trade_id)
+
+
+def main() -> None:
+    mcp.run(transport=os.environ.get("MCP_TRANSPORT", "stdio"))
+
+
+app = mcp.streamable_http_app()

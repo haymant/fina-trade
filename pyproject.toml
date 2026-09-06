@@ -1,12 +1,28 @@
 [project]
 name = "fina-trade"
-version = "0.1.0"
-description = "FinA trade repository and lifecycle event contract"
-requires-python = ">=3.9"
+version = "0.2.0"
+description = "FinA normalized RFQ, quote, trade, and lifecycle persistence MCP server"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "mcp>=1.6,<2",
+  "psycopg[binary]>=3.2,<4",
+]
+
+[project.scripts]
+fina-trade-mcp = "fina_trade.mcp_server:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["fina_trade*"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8,<9",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

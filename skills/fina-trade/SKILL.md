@@ -1,23 +1,57 @@
 ---
 name: fina-trade
-description: Register trades, observe fixing and corporate events, apply lifecycle transitions, and publish durable trade lifecycle events for FinA processes.
+description: Persist normalized equity-derivatives RFQs, versioned quotes, trades, and append-only lifecycle events in Postgres; expose the repository through MCP tools and bridge lifecycle events to FinA scheduler re-pricing.
 ---
 # FinA Trade
 
-Use this skill as the trade-repository boundary. Validate trade payloads against `schema/trade.schema.json`, persist every mutation through `TradeRepository`, and publish an event only after the mutation succeeds. The repository is intentionally small and deterministic so it can be embedded by the scheduler or exposed by a future MCP server.
+Use this skill as the production trade-repository boundary. Persist RFQs, quotes, trades, and lifecycle events in Postgres through `PostgresTradeRepository`; use `TradeRepository` only for deterministic in-memory tests. The normalized relational contract is `schema/postgres.sql`.
 
-## Contract
+## Domain model
 
-A trade has stable `trade_id` and `instrument_id`, product and terms, positive `notional`, currency, status, quote, and ISO-8601 timestamps. `register_trade` accepts RFQ/quote data and creates `LIVE` only when `status` is explicitly supplied as `LIVE`; otherwise it remains `QUOTED`. `amend_trade` and `cancel_trade` are lifecycle mutations and publish `trade.lifecycle.amended` or `trade.lifecycle.cancelled`. `observe_trade` records an observation and publishes `trade.lifecycle.observed`; `apply_corporate_event` records a corporate event and publishes `trade.lifecycle.corporate_event`.
+Persist four related records:
 
-## Event envelope
+- **RFQ**: client request, instrument/product identity, complete pricing request, correlation ID, and RFQ status.
+- **Quote**: immutable quote version linked to an RFQ, complete pricing request, RiskCube summary/result reference, PV, price, validity, and optional expiry.
+- **Trade**: accepted quote and RFQ references, instrument identity, economic terms, notional, currency, and lifecycle status.
+- **Lifecycle event**: append-only before/after trade state, event type, reason, payload, and occurrence timestamp.
 
-```json
-{"topic":"trade.lifecycle.amended","payload":{"trade_id":"T1","before":{},"after":{},"reason":"market_fixing"},"trade_id":"T1"}
+Do not overwrite a quote to represent a re-price. Create a new `quote_version`; update the trade’s accepted quote reference only when business logic accepts the new quote. RiskCube cells and large result objects remain owned by `fina-pricer` S3 persistence; store only the quote summary and object/reference metadata here.
+
+## MCP tools
+
+The `fina-trade` MCP server exposes:
+
+- `rfq_create(rfq)`
+- `quote_persist(quote)`
+- `trade_accept(trade)`
+- `trade_amend(trade_id, changes, reason)`
+- `trade_get(trade_id)`
+- `trade_lifecycle(trade_id)`
+
+All tools use `POSTGRES_URL` or `DATABASE_URL`. Each mutation is transactional. `trade_amend` writes the trade and lifecycle event in one transaction; only a committed mutation may be bridged to the scheduler EventBus.
+
+## Scheduler integration
+
+Register the persistence adapter at the single scheduler entrance. The normal flow is:
+
+```text
+rfq_create
+  → fina-pricer pricing_and_sensitivity
+  → quote_persist
+  → trade_accept
+  → trade_amend / fixing / corporate event
+  → lifecycle event
+  → scheduler subscription
+  → fina-pricer re-price
+  → new quote version
 ```
 
-Consumers must be idempotent by `event_id` or `(trade_id, updated_at, topic)`. Never overwrite a completed immutable audit record; the reference implementation keeps an in-memory append-only event log and can be replaced by a database adapter without changing the skill contract.
+Use stable IDs and correlation IDs across all records. Consumers must be idempotent by `event_id`. Never put credentials in RFQ, quote, trade, lifecycle payloads, or logs.
+
+## Deployment
+
+Manage dependencies with `uv sync` and commit `uv.lock`. The Vercel Python entrypoint is `api/index.py`; expose Streamable HTTP MCP at `/mcp`. Provision a Postgres-compatible Vercel database integration and inject its connection string as `POSTGRES_URL` or `DATABASE_URL`; run `schema/postgres.sql` as a controlled migration before enabling writes. Do not run destructive or implicit schema changes from ordinary MCP tools.
 
 ## Verification
 
-Run `pytest -q tests`. The tests cover registration, amend/cancel transitions, fixing observations, corporate events, append-only event history, and invalid status transitions. In an end-to-end scheduler process, use `register`, then subscribe a pricing handler to lifecycle topics, and finish with grouped sensitivity OLAP.
+Run `uv run pytest -q`. With a real Postgres database, migrate `schema/postgres.sql`, create an RFQ, persist two quote versions, accept one into a trade, amend the trade, then assert the RFQ status, quote versions, trade status, and ordered lifecycle events. The large RiskCube payload must remain in the pricer-owned S3 store and only its reference/summary may be persisted here.
