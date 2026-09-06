@@ -4,14 +4,37 @@ import os
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .postgres_repository import PostgresTradeRepository
-
-mcp = FastMCP("fina-trade")
 
 
 def repository() -> PostgresTradeRepository:
     return PostgresTradeRepository()
+
+
+def _allowed_hosts() -> list[str]:
+    """Allow Vercel's runtime host plus local development hosts."""
+    hosts = {
+        "fina-trade-ten.vercel.app",
+        "localhost",
+        "localhost:*",
+        "127.0.0.1",
+        "127.0.0.1:*",
+    }
+    for key in ("VERCEL_URL", "VERCEL_PROJECT_PRODUCTION_URL"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            hosts.add(value.removeprefix("https://").removeprefix("http://").rstrip("/"))
+    extra = os.environ.get("FINA_ALLOWED_HOSTS", "")
+    hosts.update(item.strip() for item in extra.split(",") if item.strip())
+    return sorted(hosts)
+
+
+mcp = FastMCP(
+    "fina-trade",
+    transport_security=TransportSecuritySettings(allowed_hosts=_allowed_hosts()),
+)
 
 
 @mcp.tool()
