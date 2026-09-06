@@ -92,6 +92,30 @@ def trade_lifecycle(trade_id: str) -> list[dict[str, Any]]:
     return repository().lifecycle(trade_id)
 
 
+@mcp.tool()
+def rfq_query(filters: dict[str, Any] | None = None, created_from: str | None = None, created_to: str | None = None, limit: int = 100) -> dict[str, Any]:
+    """Query RFQs; omitted dates default to the current UTC day."""
+    return repository().query_rfqs(filters, created_from, created_to, limit)
+
+
+@mcp.tool()
+def quote_query(filters: dict[str, Any] | None = None, created_from: str | None = None, created_to: str | None = None, limit: int = 100) -> dict[str, Any]:
+    """Query quotes; omitted dates default to the current UTC day."""
+    return repository().query_quotes(filters, created_from, created_to, limit)
+
+
+@mcp.tool()
+def trade_query(filters: dict[str, Any] | None = None, created_from: str | None = None, created_to: str | None = None, limit: int = 100) -> dict[str, Any]:
+    """Query trades; omitted dates default to the current UTC day."""
+    return repository().query_trades(filters, created_from, created_to, limit)
+
+
+@mcp.tool()
+def lifecycle_query(filters: dict[str, Any] | None = None, created_from: str | None = None, created_to: str | None = None, limit: int = 100) -> dict[str, Any]:
+    """Query lifecycle events; omitted dates default to the current UTC day."""
+    return repository().query_lifecycle(filters, created_from, created_to, limit)
+
+
 def main() -> None:
     mcp.run(transport=os.environ.get("MCP_TRANSPORT", "stdio"))
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterator
 
@@ -104,6 +104,47 @@ class PostgresTradeRepository:
         with self.connection() as conn:
             rows = conn.execute("SELECT * FROM trade_lifecycle_events WHERE trade_id = %s ORDER BY occurred_at, event_id", (trade_id,)).fetchall()
         return [_jsonable(dict(row)) for row in rows]
+
+    @staticmethod
+    def _range_bounds(created_from: str | None, created_to: str | None) -> tuple[datetime, datetime]:
+        """Return a half-open UTC range; omitted bounds mean today in UTC."""
+        today = datetime.now(timezone.utc).date()
+        start = datetime.combine(date.fromisoformat(created_from), time.min, tzinfo=timezone.utc) if created_from else datetime.combine(today, time.min, tzinfo=timezone.utc)
+        end = datetime.combine(date.fromisoformat(created_to) + timedelta(days=1), time.min, tzinfo=timezone.utc) if created_to else (start + timedelta(days=1))
+        if end <= start:
+            raise ValueError("created_to must be on or after created_from")
+        return start, end
+
+    def _query(self, table: str, fields: dict[str, str], filters: dict[str, Any] | None, created_from: str | None, created_to: str | None, limit: int) -> dict[str, Any]:
+        start, end = self._range_bounds(created_from, created_to)
+        clauses = ["created_at >= %s", "created_at < %s"]
+        values: list[Any] = [start, end]
+        for key, value in (filters or {}).items():
+            if value in (None, ""):
+                continue
+            column = fields.get(key)
+            if column is None:
+                raise ValueError(f"unsupported filter for {table}: {key}")
+            clauses.append(f"{column} = %s")
+            values.append(value)
+        safe_limit = max(1, min(int(limit), 500))
+        sql = f"SELECT * FROM {table} WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT %s"
+        values.append(safe_limit)
+        with self.connection() as conn:
+            rows = conn.execute(sql, values).fetchall()
+        return {"rows": [_jsonable(dict(row)) for row in rows], "count": len(rows), "created_from": start.isoformat(), "created_to": end.isoformat(), "limit": safe_limit}
+
+    def query_rfqs(self, filters: dict[str, Any] | None = None, created_from: str | None = None, created_to: str | None = None, limit: int = 100) -> dict[str, Any]:
+        return self._query("rfqs", {"rfq_id": "rfq_id", "correlation_id": "correlation_id", "client_id": "client_id", "instrument_id": "instrument_id", "product_type": "product_type", "status": "status"}, filters, created_from, created_to, limit)
+
+    def query_quotes(self, filters: dict[str, Any] | None = None, created_from: str | None = None, created_to: str | None = None, limit: int = 100) -> dict[str, Any]:
+        return self._query("quotes", {"quote_id": "quote_id", "rfq_id": "rfq_id", "trade_id": "trade_id", "status": "status", "pv_currency": "pv_currency"}, filters, created_from, created_to, limit)
+
+    def query_trades(self, filters: dict[str, Any] | None = None, created_from: str | None = None, created_to: str | None = None, limit: int = 100) -> dict[str, Any]:
+        return self._query("trades", {"trade_id": "trade_id", "rfq_id": "rfq_id", "accepted_quote_id": "accepted_quote_id", "instrument_id": "instrument_id", "product_type": "product_type", "currency": "currency", "status": "status"}, filters, created_from, created_to, limit)
+
+    def query_lifecycle(self, filters: dict[str, Any] | None = None, created_from: str | None = None, created_to: str | None = None, limit: int = 100) -> dict[str, Any]:
+        return self._query("trade_lifecycle_events", {"event_id": "event_id", "trade_id": "trade_id", "event_type": "event_type"}, filters, created_from, created_to, limit)
 
     @staticmethod
     def _event(conn: psycopg.Connection[Any], trade_id: str, event_type: str, before: dict[str, Any] | None, after: dict[str, Any], payload: dict[str, Any]) -> None:

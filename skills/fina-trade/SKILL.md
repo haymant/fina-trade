@@ -27,8 +27,14 @@ The `fina-trade` MCP server exposes:
 - `trade_amend(trade_id, changes, reason)`
 - `trade_get(trade_id)`
 - `trade_lifecycle(trade_id)`
+- `rfq_query(filters?, created_from?, created_to?, limit?)`
+- `quote_query(filters?, created_from?, created_to?, limit?)`
+- `trade_query(filters?, created_from?, created_to?, limit?)`
+- `lifecycle_query(filters?, created_from?, created_to?, limit?)`
 
 All tools use `POSTGRES_URL` or `DATABASE_URL`. Each mutation is transactional. `trade_amend` writes the trade and lifecycle event in one transaction; only a committed mutation may be bridged to the scheduler EventBus.
+
+Every RFQ, quote, trade, and lifecycle event has UTC `created_at` and `updated_at` timestamps. Legacy domain timestamps (`received_at`, `quoted_at`, and `occurred_at`) are retained as aliases or event-time fields. Query tools accept ISO dates (`YYYY-MM-DD`) for `created_from` and `created_to`; the range is half-open and inclusive by calendar day. When both dates are omitted, the query returns records created from today at `00:00:00Z` through before tomorrow at `00:00:00Z`. `filters` supports exact indexed business fields such as IDs, status, instrument/product, currency, client, and lifecycle event type. Results are newest-first and capped at 500 rows.
 
 ## Scheduler integration
 
