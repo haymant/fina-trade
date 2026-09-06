@@ -4,11 +4,25 @@ import os
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Iterator
 
 import psycopg
 from psycopg.types.json import Jsonb
 from psycopg.rows import dict_row
+
+
+def _jsonable(value: Any) -> Any:
+    """Convert psycopg values into stable JSON/MCP-compatible values."""
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    return value
 
 
 class PostgresTradeRepository:
@@ -38,7 +52,7 @@ class PostgresTradeRepository:
                 VALUES (%s, %s, %s, %s, %s, %s, 'RECEIVED', %s, %s)
                 RETURNING *
             """, (rfq_id, record["correlation_id"], record.get("client_id"), record["instrument_id"], record["product_type"], Jsonb(record["request"]), now, now)).fetchone()
-        return dict(row)
+        return _jsonable(dict(row))
 
     def persist_quote(self, quote: dict[str, Any]) -> dict[str, Any]:
         with self.connection() as conn:
@@ -52,7 +66,7 @@ class PostgresTradeRepository:
                 RETURNING *
             """, (quote_id, quote["rfq_id"], version, Jsonb(quote["pricing_request"]), Jsonb(result), result.get("PV", valuation.get("pv_amount")), result.get("PV_currency", valuation.get("pv_currency")), result.get("price_pct_of_notional", valuation.get("price_pct_of_notional")), quote.get("expires_at"))).fetchone()
             conn.execute("UPDATE rfqs SET status = 'QUOTED', updated_at = now() WHERE rfq_id = %s", (quote["rfq_id"],))
-        return dict(row)
+        return _jsonable(dict(row))
 
     def accept_quote(self, trade: dict[str, Any]) -> dict[str, Any]:
         trade_id = trade.get("trade_id", "T-" + uuid.uuid4().hex)
@@ -67,8 +81,8 @@ class PostgresTradeRepository:
             """, (trade_id, quote["rfq_id"], quote["quote_id"], trade["instrument_id"], trade["product_type"], Jsonb(trade.get("terms", {})), trade["notional"], trade["currency"], trade.get("status", "LIVE"))).fetchone()
             conn.execute("UPDATE quotes SET status = 'ACCEPTED', trade_id = %s WHERE quote_id = %s", (trade_id, quote["quote_id"]))
             conn.execute("UPDATE rfqs SET status = 'CONVERTED', updated_at = now() WHERE rfq_id = %s", (quote["rfq_id"],))
-            self._event(conn, trade_id, "registered", None, dict(row), {"quote_id": quote["quote_id"]})
-        return dict(row)
+            self._event(conn, trade_id, "registered", None, _jsonable(dict(row)), {"quote_id": quote["quote_id"]})
+        return _jsonable(dict(row))
 
     def amend_trade(self, trade_id: str, changes: dict[str, Any], reason: str = "amend") -> dict[str, Any]:
         with self.connection() as conn:
@@ -77,19 +91,19 @@ class PostgresTradeRepository:
             if before["status"] in ("CANCELLED", "MATURED", "TERMINATED"): raise ValueError("trade is terminal")
             terms = dict(before["terms"] or {}); terms.update(changes.get("terms", {}))
             row = conn.execute("UPDATE trades SET terms = %s, status = 'AMENDED', updated_at = now() WHERE trade_id = %s RETURNING *", (Jsonb(terms), trade_id)).fetchone()
-            self._event(conn, trade_id, "amended", dict(before), dict(row), {"changes": changes, "reason": reason})
-        return dict(row)
+            self._event(conn, trade_id, "amended", _jsonable(dict(before)), _jsonable(dict(row)), {"changes": changes, "reason": reason})
+        return _jsonable(dict(row))
 
     def get_trade(self, trade_id: str) -> dict[str, Any]:
         with self.connection() as conn:
             row = conn.execute("SELECT * FROM trades WHERE trade_id = %s", (trade_id,)).fetchone()
         if not row: raise KeyError(trade_id)
-        return dict(row)
+        return _jsonable(dict(row))
 
     def lifecycle(self, trade_id: str) -> list[dict[str, Any]]:
         with self.connection() as conn:
             rows = conn.execute("SELECT * FROM trade_lifecycle_events WHERE trade_id = %s ORDER BY occurred_at, event_id", (trade_id,)).fetchall()
-        return [dict(row) for row in rows]
+        return [_jsonable(dict(row)) for row in rows]
 
     @staticmethod
     def _event(conn: psycopg.Connection[Any], trade_id: str, event_type: str, before: dict[str, Any] | None, after: dict[str, Any], payload: dict[str, Any]) -> None:
