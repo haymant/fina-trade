@@ -1,4 +1,7 @@
 {
+  "env": {
+    "FINA_ALLOW_MIGRATIONS": "true"
+  },
   "rewrites": [
     { "source": "/mcp", "destination": "/api" },
     { "source": "/mcp/:path*", "destination": "/api" }
