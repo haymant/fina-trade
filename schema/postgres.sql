@@ -160,7 +160,7 @@ SELECT DISTINCT ON (t.instrument_id)
        t.instrument_id, t.product_type, '{}'::jsonb, FALSE,
        (SELECT MIN(q.quote_id) FROM quotes q WHERE q.instrument_id = t.instrument_id),
        (SELECT MIN(q.quoted_at) FROM quotes q WHERE q.instrument_id = t.instrument_id),
-       (SELECT MIN(q.created_at) FROM quotes q WHERE q.instrument_id = t.instrument_id),
+       COALESCE((SELECT MIN(q.created_at) FROM quotes q WHERE q.instrument_id = t.instrument_id), now()),
        now()
   FROM trades t
  WHERE NOT EXISTS (SELECT 1 FROM instruments i WHERE i.instrument_id = t.instrument_id)
