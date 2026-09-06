@@ -39,10 +39,8 @@ mcp = FastMCP(
 
 @mcp.tool()
 def database_health() -> dict[str, Any]:
-    """Check that the configured Postgres database is reachable."""
-    with repository().connection() as conn:
-        row = conn.execute("SELECT current_database() AS database, now() AS server_time").fetchone()
-    return {"ok": True, **dict(row)}
+    """Check that the configured Postgres database is reachable and report per-table row counts."""
+    return repository().health()
 
 
 @mcp.tool()
@@ -76,8 +74,14 @@ def trade_accept(trade: dict[str, Any]) -> dict[str, Any]:
 
 @mcp.tool()
 def trade_amend(trade_id: str, changes: dict[str, Any], reason: str = "amend") -> dict[str, Any]:
-    """Apply a lifecycle amendment and append an audit event transactionally."""
+    """Apply a lifecycle amendment (terms and optionally portfolio/quantity) and append an audit event transactionally."""
     return repository().amend_trade(trade_id, changes, reason)
+
+
+@mcp.tool()
+def trade_cancel(trade_id: str, reason: str = "cancel") -> dict[str, Any]:
+    """Cancel a non-terminal trade and recompute the affected (portfolio, instrument_id) position."""
+    return repository().cancel_trade(trade_id, reason)
 
 
 @mcp.tool()
@@ -108,6 +112,18 @@ def quote_query(filters: dict[str, Any] | None = None, created_from: str | None 
 def trade_query(filters: dict[str, Any] | None = None, created_from: str | None = None, created_to: str | None = None, limit: int = 100) -> dict[str, Any]:
     """Query trades; omitted dates default to the current UTC day."""
     return repository().query_trades(filters, created_from, created_to, limit)
+
+
+@mcp.tool()
+def instrument_query(filters: dict[str, Any] | None = None, created_from: str | None = None, created_to: str | None = None, limit: int = 100) -> dict[str, Any]:
+    """Query tradeable instruments; an instrument is born at its initial quote (priced at that datetime) and becomes real (indicative=false) when a quote is accepted."""
+    return repository().query_instruments(filters, created_from, created_to, limit)
+
+
+@mcp.tool()
+def position_query(filters: dict[str, Any] | None = None, limit: int = 100) -> dict[str, Any]:
+    """Query live positions aggregated per (portfolio, instrument_id) over non-terminal trades."""
+    return repository().query_positions(filters, limit)
 
 
 @mcp.tool()

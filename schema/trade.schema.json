@@ -8,6 +8,8 @@
     "trade_id": {"type": "string"}, "instrument_id": {"type": "string"}, "product_type": {"type": "string"},
     "status": {"enum": ["RFQ", "QUOTED", "LIVE", "AMENDED", "CANCELLED", "MATURED", "TERMINATED"]},
     "notional": {"type": "number", "exclusiveMinimum": 0}, "currency": {"type": "string", "minLength": 3},
+    "portfolio": {"type": "string", "default": "DEFAULT"}, "quantity": {"type": "number", "exclusiveMinimum": 0, "default": 1},
+    "rfq_id": {"type": "string"}, "accepted_quote_id": {"type": "string"},
     "quote": {"type": ["object", "null"]}, "terms": {"type": "object"}, "created_at": {"type": "string"}, "updated_at": {"type": "string"}
   }, "additionalProperties": true
 }

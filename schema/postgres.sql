@@ -105,3 +105,101 @@ CREATE INDEX IF NOT EXISTS rfqs_status_received_idx ON rfqs(status, received_at)
 CREATE INDEX IF NOT EXISTS quotes_rfq_version_idx ON quotes(rfq_id, quote_version DESC);
 CREATE INDEX IF NOT EXISTS trades_status_updated_idx ON trades(status, updated_at);
 CREATE INDEX IF NOT EXISTS lifecycle_trade_time_idx ON trade_lifecycle_events(trade_id, occurred_at);
+
+-- ============================================================================
+-- Instruments and positions
+-- An instrument is the tradeable product. It is born at the initial quote of
+-- an RFQ (priced at that initial datetime) and stays `indicative` until a
+-- quote is accepted, at which point it becomes a real (non-indicative)
+-- instrument. An RFQ has 1..N quotes (quote_version); a quote has one
+-- instrument; a trade references one instrument; and a position is the
+-- aggregate of all non-terminal trades for one instrument in one portfolio.
+-- ============================================================================
+
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS instrument_id TEXT;
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS product_type TEXT;
+
+UPDATE quotes SET instrument_id = COALESCE(
+         NULLIF(TRIM(pricing_request ->> 'instrument_id'), ''),
+         NULLIF(TRIM(pricing_request #>> '{InstrumentKey,name}'), ''),
+         NULLIF(TRIM(pricing_request #>> '{InstrumentKey,isin}'), '')
+       ) WHERE instrument_id IS NULL;
+
+UPDATE quotes SET product_type = COALESCE(
+         NULLIF(TRIM(pricing_request #>> '{InstrumentKey,product_type}'), ''),
+         'FCN'
+       ) WHERE product_type IS NULL;
+
+CREATE TABLE IF NOT EXISTS instruments (
+  instrument_id TEXT PRIMARY KEY,
+  product_type TEXT,
+  request JSONB,
+  indicative BOOLEAN NOT NULL DEFAULT TRUE,
+  initial_quote_id TEXT REFERENCES quotes(quote_id),
+  priced_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS instruments_indicative_idx ON instruments(indicative);
+CREATE INDEX IF NOT EXISTS instruments_created_idx ON instruments(created_at);
+CREATE INDEX IF NOT EXISTS quotes_instrument_idx ON quotes(instrument_id);
+
+INSERT INTO instruments (instrument_id, product_type, request, indicative, initial_quote_id, priced_at, created_at, updated_at)
+SELECT DISTINCT ON (q.instrument_id)
+       q.instrument_id, q.product_type, q.pricing_request,
+       NOT EXISTS (SELECT 1 FROM trades t WHERE t.instrument_id = q.instrument_id),
+       q.quote_id, q.quoted_at, LEAST(q.created_at, q.quoted_at), now()
+  FROM quotes q
+ WHERE q.instrument_id IS NOT NULL AND q.instrument_id <> ''
+   AND NOT EXISTS (SELECT 1 FROM instruments i WHERE i.instrument_id = q.instrument_id)
+ ORDER BY q.instrument_id, q.created_at ASC, q.quote_id;
+
+INSERT INTO instruments (instrument_id, product_type, request, indicative, initial_quote_id, priced_at, created_at, updated_at)
+SELECT DISTINCT ON (t.instrument_id)
+       t.instrument_id, t.product_type, '{}'::jsonb, FALSE,
+       (SELECT MIN(q.quote_id) FROM quotes q WHERE q.instrument_id = t.instrument_id),
+       (SELECT MIN(q.quoted_at) FROM quotes q WHERE q.instrument_id = t.instrument_id),
+       (SELECT MIN(q.created_at) FROM quotes q WHERE q.instrument_id = t.instrument_id),
+       now()
+  FROM trades t
+ WHERE NOT EXISTS (SELECT 1 FROM instruments i WHERE i.instrument_id = t.instrument_id)
+ ORDER BY t.instrument_id, t.created_at ASC;
+
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS portfolio TEXT;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS quantity DOUBLE PRECISION;
+UPDATE trades SET portfolio = COALESCE(NULLIF(TRIM(portfolio), ''), 'DEFAULT'), quantity = COALESCE(quantity, 1.0) WHERE portfolio IS NULL OR quantity IS NULL;
+ALTER TABLE trades ALTER COLUMN portfolio SET DEFAULT 'DEFAULT';
+ALTER TABLE trades ALTER COLUMN quantity SET DEFAULT 1.0;
+CREATE INDEX IF NOT EXISTS trades_portfolio_instrument_idx ON trades(portfolio, instrument_id);
+
+CREATE TABLE IF NOT EXISTS positions (
+  portfolio TEXT NOT NULL,
+  instrument_id TEXT NOT NULL,
+  product_type TEXT,
+  quantity DOUBLE PRECISION NOT NULL DEFAULT 0,
+  notional NUMERIC NOT NULL DEFAULT 0,
+  currency TEXT,
+  live_trades BIGINT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (portfolio, instrument_id)
+);
+CREATE INDEX IF NOT EXISTS positions_instrument_idx ON positions(instrument_id);
+
+INSERT INTO positions (portfolio, instrument_id, product_type, quantity, notional, currency, live_trades, updated_at)
+SELECT t.portfolio, t.instrument_id, MIN(t.product_type),
+       COALESCE(SUM(COALESCE(t.quantity, 1.0)), 0),
+       COALESCE(SUM(t.notional), 0),
+       MIN(t.currency),
+       COUNT(*),
+       now()
+  FROM trades t
+ WHERE t.status NOT IN ('CANCELLED', 'MATURED', 'TERMINATED')
+ GROUP BY t.portfolio, t.instrument_id
+ON CONFLICT (portfolio, instrument_id) DO UPDATE SET
+     product_type = EXCLUDED.product_type,
+     quantity = EXCLUDED.quantity,
+     notional = EXCLUDED.notional,
+     currency = EXCLUDED.currency,
+     live_trades = EXCLUDED.live_trades,
+     updated_at = now();

@@ -26,6 +26,9 @@ class TradeRepository:
         if missing: raise ValueError("missing trade fields: " + ",".join(missing))
         if item["notional"] <= 0: raise ValueError("notional must be positive")
         if item["trade_id"] in self.trades: raise ValueError("trade already exists: " + item["trade_id"])
+        item.setdefault("portfolio", "DEFAULT")
+        item.setdefault("quantity", 1)
+        if item["quantity"] <= 0: raise ValueError("quantity must be positive")
         item.setdefault("status", "QUOTED")
         if item["status"] not in self.VALID: raise ValueError("invalid status")
         item.setdefault("created_at", _now()); item["updated_at"] = item["created_at"]
@@ -56,6 +59,24 @@ class TradeRepository:
         trade["updated_at"] = _now()
         self._emit("trade.lifecycle.corporate_event", trade_id, {"event": event, "after": trade})
         return deepcopy(trade)
+
+    def positions(self) -> List[Dict[str, Any]]:
+        """Aggregate live trades per (portfolio, instrument_id)."""
+        aggregate: Dict[tuple, Dict[str, Any]] = {}
+        for trade in self.trades.values():
+            if trade["status"] in self.TERMINAL:
+                continue
+            key = (trade.get("portfolio", "DEFAULT"), trade["instrument_id"])
+            row = aggregate.setdefault(key, {
+                "portfolio": key[0], "instrument_id": key[1], "product_type": trade["product_type"],
+                "quantity": 0, "notional": 0, "currency": trade["currency"], "live_trades": 0, "updated_at": trade["updated_at"],
+            })
+            row["quantity"] = (row["quantity"] or 0) + (trade.get("quantity") or 1)
+            row["notional"] = (row["notional"] or 0) + float(trade["notional"])
+            row["live_trades"] += 1
+            if trade["updated_at"] > row["updated_at"]:
+                row["updated_at"] = trade["updated_at"]
+        return [aggregate[key] for key in sorted(aggregate)]
 
     def _mutable(self, trade_id: str) -> Dict[str, Any]:
         if trade_id not in self.trades: raise KeyError(trade_id)
