@@ -50,15 +50,37 @@ class PostgresTradeRepository:
         key = pricing_request.get("InstrumentKey")
         if not isinstance(key, dict):
             key = {}
+        canonical_key = pricing_request.get("instrument_key")
+        if isinstance(canonical_key, str) and canonical_key.strip():
+            canonical_name = canonical_key.strip()
+        else:
+            canonical_name = ""
         instrument_id = (
             str(pricing_request.get("instrument_id") or "").strip()
             or str(key.get("name") or "").strip()
             or str(key.get("isin") or "").strip()
+            or canonical_name
         )
         product_type = str(key.get("product_type") or pricing_request.get("product_type") or "FCN").strip()
         if not instrument_id:
             raise ValueError("pricing_request must carry instrument identity (instrument_id or InstrumentKey.name/isin)")
         return instrument_id, product_type
+
+    @staticmethod
+    def _accepted_instrument_id(conn: psycopg.Connection[Any], base_id: str, quote_id: str) -> str:
+        """Keep one instrument per accepted quote, while preserving the indicative first quote id."""
+        existing = conn.execute(
+            "SELECT instrument_id, indicative, initial_quote_id FROM instruments WHERE instrument_id = %s FOR UPDATE",
+            (base_id,),
+        ).fetchone()
+        if not existing or (bool(existing["indicative"]) and str(existing["initial_quote_id"] or "") == quote_id):
+            return base_id
+        candidate = f"{base_id}--{quote_id}"
+        suffix = 1
+        while conn.execute("SELECT 1 FROM instruments WHERE instrument_id = %s", (candidate,)).fetchone():
+            suffix += 1
+            candidate = f"{base_id}--{quote_id}-{suffix}"
+        return candidate
 
     def create_rfq(self, rfq: dict[str, Any]) -> dict[str, Any]:
         rfq_id = rfq.get("rfq_id", "RFQ-" + uuid.uuid4().hex)
@@ -102,16 +124,25 @@ class PostgresTradeRepository:
             quote = conn.execute("SELECT * FROM quotes WHERE quote_id = %s FOR UPDATE", (trade["quote_id"],)).fetchone()
             if not quote or quote["status"] not in ("VALID", "ACCEPTED"):
                 raise ValueError("quote is not valid")
+            base_instrument_id = str(quote["instrument_id"] or trade.get("instrument_id") or "").strip()
+            if not base_instrument_id:
+                raise ValueError("quote has no instrument identity")
+            instrument_id = self._accepted_instrument_id(conn, base_instrument_id, str(quote["quote_id"]))
+            product_type = str(trade.get("product_type") or quote["product_type"] or "FCN")
             row = conn.execute("""
                 INSERT INTO trades (trade_id, rfq_id, accepted_quote_id, instrument_id, product_type, terms, notional, currency, portfolio, quantity, status)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING *
-            """, (trade_id, quote["rfq_id"], quote["quote_id"], trade["instrument_id"], trade["product_type"], Jsonb(trade.get("terms", {})), trade["notional"], trade["currency"], portfolio, quantity, trade.get("status", "LIVE"))).fetchone()
-            conn.execute("UPDATE quotes SET status = 'ACCEPTED', trade_id = %s WHERE quote_id = %s", (trade_id, quote["quote_id"]))
+            """, (trade_id, quote["rfq_id"], quote["quote_id"], instrument_id, product_type, Jsonb(trade.get("terms", {})), trade["notional"], trade["currency"], portfolio, quantity, trade.get("status", "LIVE"))).fetchone()
+            conn.execute("UPDATE quotes SET status = 'ACCEPTED', trade_id = %s, instrument_id = %s WHERE quote_id = %s", (trade_id, instrument_id, quote["quote_id"]))
             conn.execute("UPDATE rfqs SET status = 'CONVERTED', updated_at = now() WHERE rfq_id = %s", (quote["rfq_id"],))
-            conn.execute("UPDATE instruments SET indicative = FALSE, product_type = COALESCE(NULLIF(%s, ''), product_type), updated_at = now() WHERE instrument_id = %s", (trade["product_type"], trade["instrument_id"]))
+            conn.execute("""
+                INSERT INTO instruments (instrument_id, product_type, request, indicative, initial_quote_id, priced_at, updated_at)
+                VALUES (%s, %s, %s, FALSE, %s, now(), now())
+                ON CONFLICT (instrument_id) DO UPDATE SET indicative = FALSE, product_type = EXCLUDED.product_type, updated_at = now()
+            """, (instrument_id, product_type, quote["pricing_request"], quote["quote_id"]))
             self._event(conn, trade_id, "registered", None, _jsonable(dict(row)), {"quote_id": quote["quote_id"], "portfolio": portfolio})
-            self._recompute_position(conn, portfolio, trade["instrument_id"])
+            self._recompute_position(conn, portfolio, instrument_id)
         return _jsonable(dict(row))
 
     def amend_trade(self, trade_id: str, changes: dict[str, Any], reason: str = "amend", expected_state_version: int | None = None) -> dict[str, Any]:
