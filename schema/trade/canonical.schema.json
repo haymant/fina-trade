@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/haymant/fina-trade/schema/trade/canonical.schema.json",
+  "title": "FinA canonical trade record",
+  "type": "object",
+  "required": ["trade_id", "instrument_id", "product_type", "status", "notional", "currency", "state_version", "correlation_id"],
+  "properties": {
+    "trade_id": {"type": "string", "minLength": 1},
+    "rfq_id": {"type": ["string", "null"]},
+    "accepted_quote_id": {"type": ["string", "null"]},
+    "instrument_id": {"type": "string", "minLength": 1},
+    "product_type": {"type": "string", "minLength": 1},
+    "status": {"enum": ["QUOTED", "LIVE", "AMENDED", "CANCELLED", "MATURED", "TERMINATED"]},
+    "notional": {"type": "number", "exclusiveMinimum": 0},
+    "currency": {"type": "string", "minLength": 3},
+    "portfolio": {"type": "string", "minLength": 1},
+    "quantity": {"type": "number", "exclusiveMinimum": 0},
+    "state_version": {"type": "integer", "minimum": 0},
+    "correlation_id": {"type": "string", "minLength": 1},
+    "causation_id": {"type": ["string", "null"]},
+    "source_revision": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "terms": {"type": "object"}
+  },
+  "additionalProperties": true
+}

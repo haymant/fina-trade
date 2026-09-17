@@ -6,6 +6,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+from .contracts import OPERATIONS
 from .postgres_repository import PostgresTradeRepository
 
 
@@ -44,6 +45,29 @@ def database_health() -> dict[str, Any]:
 
 
 @mcp.tool()
+def trade_contract() -> dict[str, Any]:
+    """Return the canonical contract revision and operation registry."""
+    return {
+        "schema": "fina.trade.v1",
+        "source_revision": os.environ.get("FINA_TRADE_SOURCE_REVISION", "local"),
+        "transport": "stdio",
+        "operations": {
+            name: {
+                "from_states": sorted(operation.from_states),
+                "to_state": operation.to_state,
+                "actor_capability": operation.actor_capability,
+                "reason_required": operation.reason_required,
+                "repricing_required": operation.repricing_required,
+                "settlement_effect": operation.settlement_effect,
+                "event_topic": operation.event_topic,
+                "refresh_targets": list(operation.refresh_targets),
+            }
+            for name, operation in OPERATIONS.items()
+        },
+    }
+
+
+@mcp.tool()
 def database_migrate() -> dict[str, Any]:
     """Apply the additive normalized schema; require explicit migration opt-in."""
     if os.environ.get("FINA_ALLOW_MIGRATIONS") != "true":
@@ -73,15 +97,15 @@ def trade_accept(trade: dict[str, Any]) -> dict[str, Any]:
 
 
 @mcp.tool()
-def trade_amend(trade_id: str, changes: dict[str, Any], reason: str = "amend") -> dict[str, Any]:
+def trade_amend(trade_id: str, changes: dict[str, Any], reason: str = "amend", expected_state_version: int | None = None) -> dict[str, Any]:
     """Apply a lifecycle amendment (terms and optionally portfolio/quantity) and append an audit event transactionally."""
-    return repository().amend_trade(trade_id, changes, reason)
+    return repository().amend_trade(trade_id, changes, reason, expected_state_version)
 
 
 @mcp.tool()
-def trade_cancel(trade_id: str, reason: str = "cancel") -> dict[str, Any]:
+def trade_cancel(trade_id: str, reason: str = "cancel", expected_state_version: int | None = None) -> dict[str, Any]:
     """Cancel a non-terminal trade and recompute the affected (portfolio, instrument_id) position."""
-    return repository().cancel_trade(trade_id, reason)
+    return repository().cancel_trade(trade_id, reason, expected_state_version)
 
 
 @mcp.tool()
@@ -130,6 +154,18 @@ def position_query(filters: dict[str, Any] | None = None, limit: int = 100) -> d
 def lifecycle_query(filters: dict[str, Any] | None = None, created_from: str | None = None, created_to: str | None = None, limit: int = 100) -> dict[str, Any]:
     """Query lifecycle events; omitted dates default to the current UTC day."""
     return repository().query_lifecycle(filters, created_from, created_to, limit)
+
+
+@mcp.tool()
+def trade_fixing(trade_id: str, fixing: dict[str, Any], reason: str = "fixing") -> dict[str, Any]:
+    """Record an immutable fixing through the repository boundary."""
+    return repository().record_fixing(trade_id, fixing, reason)
+
+
+@mcp.tool()
+def lifecycle_event_query(filters: dict[str, Any] | None = None, limit: int = 100) -> dict[str, Any]:
+    """Stable alias for lifecycle_query used by FinAP resource metadata."""
+    return repository().query_lifecycle(filters, None, None, limit)
 
 
 def main() -> None:

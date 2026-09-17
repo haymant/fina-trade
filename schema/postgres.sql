@@ -203,3 +203,43 @@ ON CONFLICT (portfolio, instrument_id) DO UPDATE SET
      currency = EXCLUDED.currency,
      live_trades = EXCLUDED.live_trades,
      updated_at = now();
+
+-- Canonical event boundary. These additive columns preserve compatibility with
+-- the original POC while making concurrency and replay semantics explicit.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS state_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS correlation_id TEXT;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS causation_id TEXT;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS source_revision TEXT NOT NULL DEFAULT 'fina-trade';
+ALTER TABLE trade_lifecycle_events ADD COLUMN IF NOT EXISTS correlation_id TEXT;
+ALTER TABLE trade_lifecycle_events ADD COLUMN IF NOT EXISTS causation_id TEXT;
+ALTER TABLE trade_lifecycle_events ADD COLUMN IF NOT EXISTS state_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE trade_lifecycle_events ADD COLUMN IF NOT EXISTS source_revision TEXT NOT NULL DEFAULT 'fina-trade';
+
+CREATE TABLE IF NOT EXISTS trade_fixings (
+  fixing_id TEXT PRIMARY KEY,
+  trade_id TEXT NOT NULL REFERENCES trades(trade_id),
+  fixing_date DATE NOT NULL,
+  observation_type TEXT NOT NULL,
+  source TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  observation JSONB NOT NULL,
+  decision JSONB NOT NULL DEFAULT '{}'::jsonb,
+  supersedes_fixing_id TEXT REFERENCES trade_fixings(fixing_id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (trade_id, fixing_date, observation_type, source, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS trade_fixings_trade_date_idx ON trade_fixings(trade_id, fixing_date);
+
+CREATE TABLE IF NOT EXISTS trade_outbox (
+  event_id TEXT PRIMARY KEY,
+  topic TEXT NOT NULL,
+  aggregate_id TEXT NOT NULL,
+  correlation_id TEXT,
+  causation_id TEXT,
+  sequence BIGINT NOT NULL,
+  state_version INTEGER NOT NULL DEFAULT 0,
+  payload JSONB NOT NULL,
+  published_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS trade_outbox_unpublished_idx ON trade_outbox(created_at) WHERE published_at IS NULL;

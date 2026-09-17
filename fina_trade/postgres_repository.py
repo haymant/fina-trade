@@ -11,6 +11,8 @@ import psycopg
 from psycopg.types.json import Jsonb
 from psycopg.rows import dict_row
 
+from .contracts import validate_operation
+
 
 def _jsonable(value: Any) -> Any:
     """Convert psycopg values into stable JSON/MCP-compatible values."""
@@ -112,13 +114,13 @@ class PostgresTradeRepository:
             self._recompute_position(conn, portfolio, trade["instrument_id"])
         return _jsonable(dict(row))
 
-    def amend_trade(self, trade_id: str, changes: dict[str, Any], reason: str = "amend") -> dict[str, Any]:
+    def amend_trade(self, trade_id: str, changes: dict[str, Any], reason: str = "amend", expected_state_version: int | None = None) -> dict[str, Any]:
         with self.connection() as conn:
             before = conn.execute("SELECT * FROM trades WHERE trade_id = %s FOR UPDATE", (trade_id,)).fetchone()
             if not before: raise KeyError(trade_id)
-            if before["status"] in ("CANCELLED", "MATURED", "TERMINATED"): raise ValueError("trade is terminal")
+            validate_operation("trade.amend", before["status"], expected_state_version, before.get("state_version", 0), reason)
             terms = dict(before["terms"] or {}); terms.update(changes.get("terms", {}))
-            sets = ["terms = %s", "updated_at = now()"]
+            sets = ["terms = %s", "state_version = state_version + 1", "updated_at = now()"]
             values: list[Any] = [Jsonb(terms)]
             if "portfolio" in changes:
                 sets.append("portfolio = %s"); values.append(str(changes["portfolio"]).strip() or "DEFAULT")
@@ -131,12 +133,12 @@ class PostgresTradeRepository:
                 self._recompute_position(conn, portfolio, row["instrument_id"])
         return _jsonable(dict(row))
 
-    def cancel_trade(self, trade_id: str, reason: str = "cancel") -> dict[str, Any]:
+    def cancel_trade(self, trade_id: str, reason: str = "cancel", expected_state_version: int | None = None) -> dict[str, Any]:
         with self.connection() as conn:
             before = conn.execute("SELECT * FROM trades WHERE trade_id = %s FOR UPDATE", (trade_id,)).fetchone()
             if not before: raise KeyError(trade_id)
-            if before["status"] in ("CANCELLED", "MATURED", "TERMINATED"): raise ValueError("trade is terminal")
-            row = conn.execute("UPDATE trades SET status = 'CANCELLED', updated_at = now() WHERE trade_id = %s RETURNING *", (trade_id,)).fetchone()
+            validate_operation("trade.cancel", before["status"], expected_state_version, before.get("state_version", 0), reason)
+            row = conn.execute("UPDATE trades SET status = 'CANCELLED', state_version = state_version + 1, updated_at = now() WHERE trade_id = %s RETURNING *", (trade_id,)).fetchone()
             self._event(conn, trade_id, "cancelled", _jsonable(dict(before)), _jsonable(dict(row)), {"reason": reason})
             self._recompute_position(conn, before["portfolio"], before["instrument_id"])
         return _jsonable(dict(row))
@@ -234,7 +236,7 @@ class PostgresTradeRepository:
 
     def health(self) -> dict[str, Any]:
         """Connection check plus exact row counts for every known table."""
-        tables = ["rfqs", "quotes", "trades", "trade_lifecycle_events", "instruments", "positions"]
+        tables = ["rfqs", "quotes", "trades", "trade_lifecycle_events", "instruments", "positions", "trade_fixings", "trade_outbox"]
         counts: dict[str, int | None] = {}
         with self.connection() as conn:
             row = conn.execute("SELECT current_database() AS database, now() AS server_time").fetchone()
@@ -243,6 +245,24 @@ class PostgresTradeRepository:
                 counts[table] = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"] if exists else None
         return {"ok": True, **{k: _jsonable(v) for k, v in row.items()}, "tables": counts}
 
+    def record_fixing(self, trade_id: str, fixing: dict[str, Any], reason: str = "fixing") -> dict[str, Any]:
+        """Insert an immutable fixing; retries with the same key return the prior record."""
+        required = ("fixing_date", "observation_type", "source", "idempotency_key")
+        missing = [key for key in required if not fixing.get(key)]
+        if missing:
+            raise ValueError("missing fixing fields: " + ",".join(missing))
+        with self.connection() as conn:
+            row = conn.execute("""INSERT INTO trade_fixings (fixing_id, trade_id, fixing_date, observation_type, source, idempotency_key, observation, decision) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (trade_id, fixing_date, observation_type, source, idempotency_key) DO UPDATE SET fixing_id = trade_fixings.fixing_id RETURNING *""", (fixing.get("fixing_id", "FIX-" + uuid.uuid4().hex), trade_id, fixing["fixing_date"], fixing["observation_type"], fixing["source"], fixing["idempotency_key"], Jsonb(fixing.get("observation", fixing)), Jsonb(fixing.get("decision", {"reason": reason})))).fetchone()
+            trade = conn.execute("SELECT * FROM trades WHERE trade_id = %s FOR UPDATE", (trade_id,)).fetchone()
+            if not trade:
+                raise KeyError(trade_id)
+            self._event(conn, trade_id, "trade.fixing.recorded", _jsonable(dict(trade)), _jsonable(dict(trade)), {"fixing_id": row["fixing_id"], "reason": reason})
+        return _jsonable(dict(row))
+
     @staticmethod
     def _event(conn: psycopg.Connection[Any], trade_id: str, event_type: str, before: dict[str, Any] | None, after: dict[str, Any], payload: dict[str, Any]) -> None:
-        conn.execute("INSERT INTO trade_lifecycle_events (event_id, trade_id, event_type, before_state, after_state, payload) VALUES (%s, %s, %s, %s, %s, %s)", (f"{trade_id}:{uuid.uuid4().hex}", trade_id, event_type, Jsonb(before) if before else None, Jsonb(after), Jsonb(payload)))
+        event_id = f"{trade_id}:{uuid.uuid4().hex}"
+        correlation_id = after.get("correlation_id")
+        state_version = int(after.get("state_version", 0))
+        conn.execute("INSERT INTO trade_lifecycle_events (event_id, trade_id, event_type, before_state, after_state, payload, correlation_id, state_version, source_revision) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)", (event_id, trade_id, event_type, Jsonb(before) if before else None, Jsonb(after), Jsonb(payload), correlation_id, state_version, os.environ.get("FINA_TRADE_SOURCE_REVISION", "fina-trade")))
+        conn.execute("INSERT INTO trade_outbox (event_id, topic, aggregate_id, correlation_id, sequence, state_version, payload) VALUES (%s, %s, %s, %s, %s, %s, %s)", (event_id, event_type, trade_id, correlation_id, state_version, state_version, Jsonb({"event_id": event_id, "event_type": event_type, "trade_id": trade_id, "state_version": state_version, "payload": payload})))
