@@ -51,6 +51,38 @@ def test_positions_aggregate_live_trades_per_portfolio_instrument():
     assert by_key[("RISK", "FCN-1")]["quantity"] == 1
 
 
+def test_instrument_query_does_not_default_to_current_day(monkeypatch):
+    from fina_trade.postgres_repository import PostgresTradeRepository
+
+    class Result:
+        def fetchall(self):
+            return [{"instrument_id": "OLD-FCN", "created_at": "2025-01-01T00:00:00+00:00"}]
+
+    class Connection:
+        def __init__(self):
+            self.sql = []
+
+        def execute(self, sql, values):
+            self.sql.append((sql, values))
+            return Result()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    conn = Connection()
+    repo = object.__new__(PostgresTradeRepository)
+    monkeypatch.setattr(repo, "connection", lambda: conn)
+
+    result = repo.query_instruments()
+
+    assert result["count"] == 1
+    assert "created_at >= %s" not in conn.sql[0][0]
+    assert "created_at < %s" not in conn.sql[0][0]
+
+
 @pytest.mark.skipif(not os.environ.get("POSTGRES_URL"), reason="POSTGRES_URL is required for Postgres-backed tests")
 def test_pg_instrument_position_lifecycle():
     from pathlib import Path

@@ -213,10 +213,13 @@ class PostgresTradeRepository:
             raise ValueError("created_to must be on or after created_from")
         return start, end
 
-    def _query(self, table: str, fields: dict[str, str], filters: dict[str, Any] | None, created_from: str | None, created_to: str | None, limit: int) -> dict[str, Any]:
-        start, end = self._range_bounds(created_from, created_to)
-        clauses = ["created_at >= %s", "created_at < %s"]
-        values: list[Any] = [start, end]
+    def _query(self, table: str, fields: dict[str, str], filters: dict[str, Any] | None, created_from: str | None, created_to: str | None, limit: int, *, default_today: bool = True) -> dict[str, Any]:
+        clauses: list[str] = []
+        values: list[Any] = []
+        if default_today or created_from or created_to:
+            start, end = self._range_bounds(created_from, created_to)
+            clauses.extend(["created_at >= %s", "created_at < %s"])
+            values.extend([start, end])
         for key, value in (filters or {}).items():
             if value in (None, ""):
                 continue
@@ -226,11 +229,16 @@ class PostgresTradeRepository:
             clauses.append(f"{column} = %s")
             values.append(value)
         safe_limit = max(1, min(int(limit), 500))
-        sql = f"SELECT * FROM {table} WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT %s"
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM {table} {where} ORDER BY created_at DESC LIMIT %s"
         values.append(safe_limit)
         with self.connection() as conn:
             rows = conn.execute(sql, values).fetchall()
-        return {"rows": [_jsonable(dict(row)) for row in rows], "count": len(rows), "created_from": start.isoformat(), "created_to": end.isoformat(), "limit": safe_limit}
+        result = {"rows": [_jsonable(dict(row)) for row in rows], "count": len(rows), "limit": safe_limit}
+        if clauses and (created_from or created_to or default_today):
+            result["created_from"] = start.isoformat()
+            result["created_to"] = end.isoformat()
+        return result
 
     def query_rfqs(self, filters: dict[str, Any] | None = None, created_from: str | None = None, created_to: str | None = None, limit: int = 100) -> dict[str, Any]:
         return self._query("rfqs", {"rfq_id": "rfq_id", "correlation_id": "correlation_id", "client_id": "client_id", "instrument_id": "instrument_id", "product_type": "product_type", "status": "status"}, filters, created_from, created_to, limit)
@@ -242,7 +250,10 @@ class PostgresTradeRepository:
         return self._query("trades", {"trade_id": "trade_id", "rfq_id": "rfq_id", "accepted_quote_id": "accepted_quote_id", "instrument_id": "instrument_id", "product_type": "product_type", "portfolio": "portfolio", "currency": "currency", "status": "status"}, filters, created_from, created_to, limit)
 
     def query_instruments(self, filters: dict[str, Any] | None = None, created_from: str | None = None, created_to: str | None = None, limit: int = 100) -> dict[str, Any]:
-        return self._query("instruments", {"instrument_id": "instrument_id", "product_type": "product_type", "indicative": "indicative", "initial_quote_id": "initial_quote_id"}, filters, created_from, created_to, limit)
+        # Instruments are a durable catalog, not a daily activity stream.  The
+        # omitted-date query must therefore include older instruments; callers
+        # can still provide an explicit created_from/created_to range.
+        return self._query("instruments", {"instrument_id": "instrument_id", "product_type": "product_type", "indicative": "indicative", "initial_quote_id": "initial_quote_id"}, filters, created_from, created_to, limit, default_today=False)
 
     def query_positions(self, filters: dict[str, Any] | None = None, limit: int = 100) -> dict[str, Any]:
         fields = {"portfolio": "portfolio", "instrument_id": "instrument_id", "product_type": "product_type", "currency": "currency"}
