@@ -140,7 +140,7 @@ class PostgresTradeRepository:
                 INSERT INTO instruments (instrument_id, product_type, request, indicative, initial_quote_id, priced_at, updated_at)
                 VALUES (%s, %s, %s, FALSE, %s, now(), now())
                 ON CONFLICT (instrument_id) DO UPDATE SET indicative = FALSE, product_type = EXCLUDED.product_type, updated_at = now()
-            """, (instrument_id, product_type, quote["pricing_request"], quote["quote_id"]))
+            """, (instrument_id, product_type, Jsonb(quote["pricing_request"]), quote["quote_id"]))
             self._event(conn, trade_id, "registered", None, _jsonable(dict(row)), {"quote_id": quote["quote_id"], "portfolio": portfolio})
             self._recompute_position(conn, portfolio, instrument_id)
         return _jsonable(dict(row))
